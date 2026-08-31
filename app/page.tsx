@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Crop, FileImage, Gauge, ImageDown, LockKeyhole, Maximize2, RotateCcw, Sparkles, UploadCloud } from 'lucide-react';
+import { Crop, FileImage, Gauge, ImageDown, LockKeyhole, Maximize2, RotateCcw, UploadCloud } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 type UploadedGif = { file: File; url: string };
@@ -40,7 +40,13 @@ export default function Home() {
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
       <header className="flex h-20 items-center justify-between border-b border-border/80 bg-white/80 px-5 backdrop-blur-xl sm:px-10 lg:px-14">
-        <div className="brand-mark" aria-label="Smart GIF Studio logo"><Sparkles className="size-5" /></div>
+        <a
+          className="brand-mark"
+          href="https://www.jinju.go.kr/00130/02730/00138.web?amode=view&gcode=1004&idx=39612749&artiSno="
+          aria-label="Visit the linked Jinju City page"
+        >
+          <img src="/logo.png" alt="Smart GIF Studio" />
+        </a>
         <div className="text-right">
           <p className="text-base font-bold tracking-[-0.02em] sm:text-lg">Smart GIF Studio</p>
           <p className="hidden text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground sm:block">Private by design</p>
