@@ -7,7 +7,14 @@ import { Slider } from '@/components/ui/slider';
 
 type UploadedGif = { file: File; url: string };
 type GifMetadata = { width: number; height: number; frames: number; fps: number | null; duration: number | null };
-type ResizedGif = { blob: Blob; url: string; metadata: GifMetadata };
+type ResultGif = { blob: Blob; url: string; metadata: GifMetadata };
+const cropRatios = [
+  { label: '1:1', value: 1 },
+  { label: '4:3', value: 4 / 3 },
+  { label: '16:9', value: 16 / 9 },
+  { label: '3:4', value: 3 / 4 },
+  { label: '9:16', value: 9 / 16 },
+];
 const tools = [
   { icon: Maximize2, title: 'Resize', detail: 'Change width and height' },
   { icon: Crop, title: 'Crop', detail: 'Trim the visible area' },
@@ -86,17 +93,24 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState('');
   const [metadata, setMetadata] = useState<GifMetadata | null>(null);
-  const [activeTool, setActiveTool] = useState<'tools' | 'resize'>('tools');
+  const [activeTool, setActiveTool] = useState<'tools' | 'resize' | 'crop'>('tools');
   const [resizeWidth, setResizeWidth] = useState(1);
   const [resizeHeight, setResizeHeight] = useState(1);
   const [aspectLocked, setAspectLocked] = useState(true);
   const [showOriginal, setShowOriginal] = useState(true);
-  const [resized, setResized] = useState<ResizedGif | null>(null);
+  const [resized, setResized] = useState<ResultGif | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const [resizeError, setResizeError] = useState('');
+  const [cropRatio, setCropRatio] = useState('1:1');
+  const [cropMode, setCropMode] = useState<'cover' | 'fill'>('cover');
+  const [cropColor, setCropColor] = useState('#ffffff');
+  const [cropped, setCropped] = useState<ResultGif | null>(null);
+  const [isCropping, setIsCropping] = useState(false);
+  const [cropError, setCropError] = useState('');
 
   useEffect(() => () => { if (uploaded) URL.revokeObjectURL(uploaded.url); }, [uploaded]);
   useEffect(() => () => { if (resized) URL.revokeObjectURL(resized.url); }, [resized]);
+  useEffect(() => () => { if (cropped) URL.revokeObjectURL(cropped.url); }, [cropped]);
 
   const loadFile = async (file?: File) => {
     setError('');
@@ -109,7 +123,9 @@ export default function Home() {
     setActiveTool('tools');
     setShowOriginal(true);
     setResized(null);
+    setCropped(null);
     setResizeError('');
+    setCropError('');
     setUploaded({ file, url: URL.createObjectURL(file) });
     try {
       const nextMetadata = parseGifMetadata(await file.arrayBuffer());
@@ -128,6 +144,15 @@ export default function Home() {
     setAspectLocked(true);
     setResizeError('');
     setActiveTool('resize');
+  };
+
+  const openCrop = () => {
+    if (!metadata) return;
+    setCropRatio('1:1');
+    setCropMode('cover');
+    setCropColor('#ffffff');
+    setCropError('');
+    setActiveTool('crop');
   };
 
   const updateWidth = (value: number) => {
@@ -186,6 +211,71 @@ export default function Home() {
       setResizeError('The GIF could not be resized. Please try another file or size.');
     } finally {
       setIsResizing(false);
+    }
+  };
+
+  const runCrop = async () => {
+    if (!uploaded || !metadata) return;
+    setIsCropping(true);
+    setCropError('');
+    try {
+      const { decode, decodeFrames, encode } = await import('modern-gif');
+      const source = await uploaded.file.arrayBuffer();
+      const gif = decode(source);
+      const frames = decodeFrames(source, { gif });
+      const ratio = cropRatios.find((item) => item.label === cropRatio)?.value ?? 1;
+      let outputWidth: number;
+      let outputHeight: number;
+      if (gif.width / gif.height > ratio) {
+        outputHeight = gif.height;
+        outputWidth = Math.max(1, Math.round(outputHeight * ratio));
+      } else {
+        outputWidth = gif.width;
+        outputHeight = Math.max(1, Math.round(outputWidth / ratio));
+      }
+
+      const sourceCanvas = document.createElement('canvas');
+      const targetCanvas = document.createElement('canvas');
+      sourceCanvas.width = gif.width;
+      sourceCanvas.height = gif.height;
+      targetCanvas.width = outputWidth;
+      targetCanvas.height = outputHeight;
+      const sourceContext = sourceCanvas.getContext('2d');
+      const targetContext = targetCanvas.getContext('2d');
+      if (!sourceContext || !targetContext) throw new Error('Canvas is unavailable');
+
+      const outputFrames = frames.map((frame) => {
+        sourceContext.clearRect(0, 0, gif.width, gif.height);
+        sourceContext.putImageData(new ImageData(frame.data, frame.width, frame.height), 0, 0);
+        targetContext.clearRect(0, 0, outputWidth, outputHeight);
+        const scale = cropMode === 'cover'
+          ? Math.max(outputWidth / gif.width, outputHeight / gif.height)
+          : Math.min(outputWidth / gif.width, outputHeight / gif.height);
+        const drawWidth = gif.width * scale;
+        const drawHeight = gif.height * scale;
+        const drawX = (outputWidth - drawWidth) / 2;
+        const drawY = (outputHeight - drawHeight) / 2;
+        if (cropMode === 'fill') {
+          targetContext.fillStyle = cropColor;
+          targetContext.fillRect(0, 0, outputWidth, outputHeight);
+        }
+        targetContext.imageSmoothingEnabled = true;
+        targetContext.imageSmoothingQuality = 'high';
+        targetContext.drawImage(sourceCanvas, drawX, drawY, drawWidth, drawHeight);
+        return { data: targetContext.getImageData(0, 0, outputWidth, outputHeight).data, delay: frame.delay };
+      });
+
+      const blob = await encode({
+        format: 'blob', width: outputWidth, height: outputHeight, frames: outputFrames,
+        looped: gif.looped, loopCount: gif.loopCount, maxColors: 255, dither: 'floyd-steinberg',
+      });
+      const resultMetadata = parseGifMetadata(await blob.arrayBuffer());
+      setCropped({ blob, url: URL.createObjectURL(blob), metadata: resultMetadata });
+      setShowOriginal(false);
+    } catch {
+      setCropError('The GIF could not be cropped. Please try another option.');
+    } finally {
+      setIsCropping(false);
     }
   };
 
@@ -303,6 +393,31 @@ export default function Home() {
                 </div>
               </section>
             )}
+
+            {cropped && (
+              <section className="preview-card min-w-0" aria-label="Cropped GIF">
+                <div className="preview-header">
+                  <span className="result-badge"><Crop /></span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9e97ff]">Cropped GIF</p>
+                    <p className="truncate text-sm font-semibold text-white">Cropped_{uploaded.file.name}</p>
+                  </div>
+                  <a className="download-button" href={cropped.url} download={`Cropped_${uploaded.file.name}`}><Download /> Download</a>
+                </div>
+                <div className="preview-stage"><div className="checkerboard"><img src={cropped.url} alt={`Cropped preview of ${uploaded.file.name}`} /></div></div>
+                <div className="gif-info">
+                  <h2 className="text-xl font-black tracking-[-0.03em] text-white">File information</h2>
+                  <dl className="metadata-grid">
+                    <div><dt>File size</dt><dd>{formatSize(cropped.blob.size)}</dd></div>
+                    <div><dt>Resolution</dt><dd>{cropped.metadata.width} × {cropped.metadata.height}</dd></div>
+                    <div><dt>Frame rate</dt><dd>{cropped.metadata.fps ? `${cropped.metadata.fps.toFixed(1)} FPS` : '—'}</dd></div>
+                    <div><dt>Total frames</dt><dd>{cropped.metadata.frames.toLocaleString()}</dd></div>
+                    <div><dt>Duration</dt><dd>{cropped.metadata.duration ? `${cropped.metadata.duration.toFixed(2)} sec` : '—'}</dd></div>
+                    <div><dt>Format</dt><dd>GIF</dd></div>
+                  </dl>
+                </div>
+              </section>
+            )}
           </div>
           <aside className="panel-card" aria-label="GIF editing panel">
             {activeTool === 'tools' ? (
@@ -314,7 +429,7 @@ export default function Home() {
                 </div>
                 <div className="grid gap-3 p-4 sm:p-5">
                   {tools.map(({ icon: Icon, title, detail }) => (
-                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : undefined}>
+                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : title === 'Crop' ? openCrop : undefined}>
                       <span className="tool-icon"><Icon /></span>
                       <span className="min-w-0 flex-1 text-left"><span className="block text-sm font-bold">{title}</span><span className="block text-xs text-muted-foreground">{detail}</span></span>
                       <span className="text-lg text-muted-foreground/50">›</span>
@@ -323,7 +438,7 @@ export default function Home() {
                 </div>
                 <div className="mx-5 mb-5 rounded-2xl bg-secondary p-4"><p className="flex items-center gap-2 text-xs font-semibold text-secondary-foreground"><LockKeyhole className="size-3.5 text-primary" /> Your file stays on this device</p></div>
               </>
-            ) : (
+            ) : activeTool === 'resize' ? (
               <>
                 <div className="border-b border-border px-5 py-5 sm:px-6">
                   <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Resize tool</p>
@@ -363,6 +478,51 @@ export default function Home() {
                   <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isResizing} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
                   <Button size="lg" className="h-11 flex-1 font-bold" disabled={isResizing || !metadata} onClick={runResize}>
                     {isResizing ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="border-b border-border px-5 py-5 sm:px-6">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Crop tool</p>
+                  <h2 className="mt-1 text-2xl font-black tracking-[-0.035em]">Crop your GIF</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">Choose a ratio and how the frame should be filled.</p>
+                </div>
+                <div className="crop-controls">
+                  <fieldset>
+                    <legend>Aspect ratio</legend>
+                    <div className="ratio-grid">
+                      {cropRatios.map((ratio) => (
+                        <button key={ratio.label} className={cropRatio === ratio.label ? 'is-selected' : ''} type="button" onClick={() => setCropRatio(ratio.label)}>{ratio.label}</button>
+                      ))}
+                    </div>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Fill method</legend>
+                    <div className="mode-grid">
+                      <button className={cropMode === 'cover' ? 'is-selected' : ''} type="button" onClick={() => setCropMode('cover')}>
+                        <Maximize2 /><span><b>Fill frame</b><small>Zoom and crop edges</small></span>
+                      </button>
+                      <button className={cropMode === 'fill' ? 'is-selected' : ''} type="button" onClick={() => setCropMode('fill')}>
+                        <Sparkles /><span><b>Solid color</b><small>Keep the whole image</small></span>
+                      </button>
+                    </div>
+                  </fieldset>
+                  {cropMode === 'fill' && (
+                    <label className="color-field">
+                      <span>Background color</span>
+                      <span><input type="color" value={cropColor} onChange={(event) => setCropColor(event.target.value)} /><output>{cropColor.toUpperCase()}</output></span>
+                    </label>
+                  )}
+                  <div className="crop-note">
+                    <Crop /><p><b>Centered crop</b><span>The subject stays centered in every frame.</span></p>
+                  </div>
+                  {cropError && <p className="text-sm font-semibold text-destructive" role="alert">{cropError}</p>}
+                </div>
+                <div className="panel-actions">
+                  <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isCropping} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
+                  <Button size="lg" className="h-11 flex-1 font-bold" disabled={isCropping || !metadata} onClick={runCrop}>
+                    {isCropping ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
                   </Button>
                 </div>
               </>
