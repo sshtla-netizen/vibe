@@ -1,11 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Crop, Download, FileImage, Gauge, ImageDown, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Crop, Download, FileImage, Gauge, ImageDown, LoaderCircle, Lock, LockOpen, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Slider } from '@/components/ui/slider';
 
 type UploadedGif = { file: File; url: string };
 type GifMetadata = { width: number; height: number; frames: number; fps: number | null; duration: number | null };
+type ResizedGif = { blob: Blob; url: string; metadata: GifMetadata };
 const tools = [
   { icon: Maximize2, title: 'Resize', detail: 'Change width and height' },
   { icon: Crop, title: 'Crop', detail: 'Trim the visible area' },
@@ -84,8 +86,17 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState('');
   const [metadata, setMetadata] = useState<GifMetadata | null>(null);
+  const [activeTool, setActiveTool] = useState<'tools' | 'resize'>('tools');
+  const [resizeWidth, setResizeWidth] = useState(1);
+  const [resizeHeight, setResizeHeight] = useState(1);
+  const [aspectLocked, setAspectLocked] = useState(true);
+  const [showOriginal, setShowOriginal] = useState(true);
+  const [resized, setResized] = useState<ResizedGif | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
+  const [resizeError, setResizeError] = useState('');
 
   useEffect(() => () => { if (uploaded) URL.revokeObjectURL(uploaded.url); }, [uploaded]);
+  useEffect(() => () => { if (resized) URL.revokeObjectURL(resized.url); }, [resized]);
 
   const loadFile = async (file?: File) => {
     setError('');
@@ -95,11 +106,86 @@ export default function Home() {
       return;
     }
     setMetadata(null);
+    setActiveTool('tools');
+    setShowOriginal(true);
+    setResized(null);
+    setResizeError('');
     setUploaded({ file, url: URL.createObjectURL(file) });
     try {
-      setMetadata(parseGifMetadata(await file.arrayBuffer()));
+      const nextMetadata = parseGifMetadata(await file.arrayBuffer());
+      setMetadata(nextMetadata);
+      setResizeWidth(nextMetadata.width);
+      setResizeHeight(nextMetadata.height);
     } catch {
       setMetadata(null);
+    }
+  };
+
+  const openResize = () => {
+    if (!metadata) return;
+    setResizeWidth(metadata.width);
+    setResizeHeight(metadata.height);
+    setAspectLocked(true);
+    setResizeError('');
+    setActiveTool('resize');
+  };
+
+  const updateWidth = (value: number) => {
+    setResizeWidth(value);
+    if (aspectLocked && metadata) setResizeHeight(Math.max(1, Math.round(value * metadata.height / metadata.width)));
+  };
+
+  const updateHeight = (value: number) => {
+    setResizeHeight(value);
+    if (aspectLocked && metadata) setResizeWidth(Math.max(1, Math.round(value * metadata.width / metadata.height)));
+  };
+
+  const runResize = async () => {
+    if (!uploaded || !metadata) return;
+    setIsResizing(true);
+    setResizeError('');
+    try {
+      const { decode, decodeFrames, encode } = await import('modern-gif');
+      const source = await uploaded.file.arrayBuffer();
+      const gif = decode(source);
+      const frames = decodeFrames(source, { gif });
+      const sourceCanvas = document.createElement('canvas');
+      const targetCanvas = document.createElement('canvas');
+      sourceCanvas.width = gif.width;
+      sourceCanvas.height = gif.height;
+      targetCanvas.width = resizeWidth;
+      targetCanvas.height = resizeHeight;
+      const sourceContext = sourceCanvas.getContext('2d');
+      const targetContext = targetCanvas.getContext('2d');
+      if (!sourceContext || !targetContext) throw new Error('Canvas is unavailable');
+
+      const outputFrames = frames.map((frame) => {
+        sourceContext.clearRect(0, 0, gif.width, gif.height);
+        sourceContext.putImageData(new ImageData(frame.data, frame.width, frame.height), 0, 0);
+        targetContext.clearRect(0, 0, resizeWidth, resizeHeight);
+        targetContext.imageSmoothingEnabled = true;
+        targetContext.imageSmoothingQuality = 'high';
+        targetContext.drawImage(sourceCanvas, 0, 0, resizeWidth, resizeHeight);
+        return { data: targetContext.getImageData(0, 0, resizeWidth, resizeHeight).data, delay: frame.delay };
+      });
+
+      const blob = await encode({
+        format: 'blob',
+        width: resizeWidth,
+        height: resizeHeight,
+        frames: outputFrames,
+        looped: gif.looped,
+        loopCount: gif.loopCount,
+        maxColors: 255,
+        dither: 'floyd-steinberg',
+      });
+      const resultMetadata = parseGifMetadata(await blob.arrayBuffer());
+      setResized({ blob, url: URL.createObjectURL(blob), metadata: resultMetadata });
+      setShowOriginal(false);
+    } catch {
+      setResizeError('The GIF could not be resized. Please try another file or size.');
+    } finally {
+      setIsResizing(false);
     }
   };
 
@@ -157,52 +243,130 @@ export default function Home() {
         </section>
       ) : (
         <section className="editor-shell mx-auto grid w-full max-w-[1280px] gap-6 px-4 py-6 sm:px-8 lg:grid-cols-[minmax(0,1.5fr)_minmax(330px,0.75fr)] lg:px-10 lg:py-10">
-          <section className="preview-card min-w-0" aria-label="GIF preview">
-            <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-white">{uploaded.file.name}</p>
-                <p className="mt-0.5 text-xs text-white/50">GIF · {formatSize(uploaded.file.size)}</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <a className="download-button" href={uploaded.url} download={uploaded.file.name}><Download /> Download</a>
-                <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => {
-                  if (inputRef.current) inputRef.current.value = '';
-                  inputRef.current?.click();
-                }}><FileImage /> Choose Another File</Button>
-              </div>
-            </div>
-            <div className="preview-stage"><div className="checkerboard"><img src={uploaded.url} alt={`Preview of ${uploaded.file.name}`} /></div></div>
-            <div className="gif-info">
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#9e97ff]">Original GIF</p>
-                <h2 className="mt-1 text-xl font-black tracking-[-0.03em] text-white">File information</h2>
-              </div>
-              <dl className="metadata-grid">
-                <div><dt>File size</dt><dd>{formatSize(uploaded.file.size)}</dd></div>
-                <div><dt>Resolution</dt><dd>{metadata ? `${metadata.width} × ${metadata.height}` : '—'}</dd></div>
-                <div><dt>Frame rate</dt><dd>{metadata?.fps ? `${metadata.fps.toFixed(1)} FPS` : '—'}</dd></div>
-                <div><dt>Total frames</dt><dd>{metadata ? metadata.frames.toLocaleString() : '—'}</dd></div>
-                <div><dt>Duration</dt><dd>{metadata?.duration ? `${metadata.duration.toFixed(2)} sec` : '—'}</dd></div>
-                <div><dt>Format</dt><dd>GIF</dd></div>
-              </dl>
-            </div>
-          </section>
-          <aside className="panel-card" aria-label="GIF editing panel">
-            <div className="border-b border-border px-5 py-5 sm:px-6">
-              <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Editing tools</p>
-              <h2 className="mt-1 text-2xl font-black tracking-[-0.035em]">Shape your GIF</h2>
-              <p className="mt-1 text-sm text-muted-foreground">Select a tool to start editing.</p>
-            </div>
-            <div className="grid gap-3 p-4 sm:p-5">
-              {tools.map(({ icon: Icon, title, detail }) => (
-                <button key={title} className="tool-row" type="button">
-                  <span className="tool-icon"><Icon /></span>
-                  <span className="min-w-0 flex-1 text-left"><span className="block text-sm font-bold">{title}</span><span className="block text-xs text-muted-foreground">{detail}</span></span>
-                  <span className="text-lg text-muted-foreground/50">›</span>
+          <div className="result-stack min-w-0">
+            <section className="preview-card min-w-0" aria-label="Original GIF">
+              <div className="preview-header">
+                <button className="collapse-button" type="button" onClick={() => setShowOriginal((visible) => !visible)} aria-expanded={showOriginal} aria-label={`${showOriginal ? 'Collapse' : 'Expand'} Original GIF`}>
+                  {showOriginal ? <ChevronDown /> : <ChevronRight />}
                 </button>
-              ))}
-            </div>
-            <div className="mx-5 mb-5 rounded-2xl bg-secondary p-4"><p className="flex items-center gap-2 text-xs font-semibold text-secondary-foreground"><LockKeyhole className="size-3.5 text-primary" /> Your file stays on this device</p></div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9e97ff]">Original GIF</p>
+                  <p className="truncate text-sm font-semibold text-white">{uploaded.file.name}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <a className="download-button" href={uploaded.url} download={uploaded.file.name}><Download /> Download</a>
+                  <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => {
+                    if (inputRef.current) inputRef.current.value = '';
+                    inputRef.current?.click();
+                  }}><FileImage /> Choose Another File</Button>
+                </div>
+              </div>
+              {showOriginal && (
+                <>
+                  <div className="preview-stage"><div className="checkerboard"><img src={uploaded.url} alt={`Preview of ${uploaded.file.name}`} /></div></div>
+                  <div className="gif-info">
+                    <h2 className="text-xl font-black tracking-[-0.03em] text-white">File information</h2>
+                    <dl className="metadata-grid">
+                      <div><dt>File size</dt><dd>{formatSize(uploaded.file.size)}</dd></div>
+                      <div><dt>Resolution</dt><dd>{metadata ? `${metadata.width} × ${metadata.height}` : '—'}</dd></div>
+                      <div><dt>Frame rate</dt><dd>{metadata?.fps ? `${metadata.fps.toFixed(1)} FPS` : '—'}</dd></div>
+                      <div><dt>Total frames</dt><dd>{metadata ? metadata.frames.toLocaleString() : '—'}</dd></div>
+                      <div><dt>Duration</dt><dd>{metadata?.duration ? `${metadata.duration.toFixed(2)} sec` : '—'}</dd></div>
+                      <div><dt>Format</dt><dd>GIF</dd></div>
+                    </dl>
+                  </div>
+                </>
+              )}
+            </section>
+
+            {resized && (
+              <section className="preview-card min-w-0" aria-label="Resized GIF">
+                <div className="preview-header">
+                  <span className="result-badge"><Maximize2 /></span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9e97ff]">Resized GIF</p>
+                    <p className="truncate text-sm font-semibold text-white">Resized_{uploaded.file.name}</p>
+                  </div>
+                  <a className="download-button" href={resized.url} download={`Resized_${uploaded.file.name}`}><Download /> Download</a>
+                </div>
+                <div className="preview-stage"><div className="checkerboard"><img src={resized.url} alt={`Resized preview of ${uploaded.file.name}`} /></div></div>
+                <div className="gif-info">
+                  <h2 className="text-xl font-black tracking-[-0.03em] text-white">File information</h2>
+                  <dl className="metadata-grid">
+                    <div><dt>File size</dt><dd>{formatSize(resized.blob.size)}</dd></div>
+                    <div><dt>Resolution</dt><dd>{resized.metadata.width} × {resized.metadata.height}</dd></div>
+                    <div><dt>Frame rate</dt><dd>{resized.metadata.fps ? `${resized.metadata.fps.toFixed(1)} FPS` : '—'}</dd></div>
+                    <div><dt>Total frames</dt><dd>{resized.metadata.frames.toLocaleString()}</dd></div>
+                    <div><dt>Duration</dt><dd>{resized.metadata.duration ? `${resized.metadata.duration.toFixed(2)} sec` : '—'}</dd></div>
+                    <div><dt>Format</dt><dd>GIF</dd></div>
+                  </dl>
+                </div>
+              </section>
+            )}
+          </div>
+          <aside className="panel-card" aria-label="GIF editing panel">
+            {activeTool === 'tools' ? (
+              <>
+                <div className="border-b border-border px-5 py-5 sm:px-6">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Editing tools</p>
+                  <h2 className="mt-1 text-2xl font-black tracking-[-0.035em]">Shape your GIF</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">Select a tool to start editing.</p>
+                </div>
+                <div className="grid gap-3 p-4 sm:p-5">
+                  {tools.map(({ icon: Icon, title, detail }) => (
+                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : undefined}>
+                      <span className="tool-icon"><Icon /></span>
+                      <span className="min-w-0 flex-1 text-left"><span className="block text-sm font-bold">{title}</span><span className="block text-xs text-muted-foreground">{detail}</span></span>
+                      <span className="text-lg text-muted-foreground/50">›</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="mx-5 mb-5 rounded-2xl bg-secondary p-4"><p className="flex items-center gap-2 text-xs font-semibold text-secondary-foreground"><LockKeyhole className="size-3.5 text-primary" /> Your file stays on this device</p></div>
+              </>
+            ) : (
+              <>
+                <div className="border-b border-border px-5 py-5 sm:px-6">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Resize tool</p>
+                  <h2 className="mt-1 text-2xl font-black tracking-[-0.035em]">Resize your GIF</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">Adjust output dimensions in pixels.</p>
+                </div>
+                {metadata && (
+                  <div className="resize-controls">
+                    <div className="axis-heading">
+                      <span className="axis-badge">X</span>
+                      <button className="aspect-lock" type="button" onClick={() => setAspectLocked((locked) => !locked)} aria-pressed={aspectLocked} aria-label={aspectLocked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}>
+                        {aspectLocked ? <Lock /> : <LockOpen />}
+                      </button>
+                      <span className="axis-badge">Y</span>
+                    </div>
+
+                    <label className="slider-field">
+                      <span><b>X axis</b><output>{resizeWidth} px</output></span>
+                      <Slider min={Math.max(1, Math.floor(metadata.width * 0.05))} max={Math.max(1, Math.ceil(metadata.width * 3))} step={1} value={[resizeWidth]} onValueChange={(value) => updateWidth(Array.isArray(value) ? value[0] : value)} />
+                      <small>{Math.max(1, Math.floor(metadata.width * 0.05))} px <span>{Math.ceil(metadata.width * 3)} px</span></small>
+                    </label>
+
+                    <label className="slider-field">
+                      <span><b>Y axis</b><output>{resizeHeight} px</output></span>
+                      <Slider min={Math.max(1, Math.floor(metadata.height * 0.05))} max={Math.max(1, Math.ceil(metadata.height * 3))} step={1} value={[resizeHeight]} onValueChange={(value) => updateHeight(Array.isArray(value) ? value[0] : value)} />
+                      <small>{Math.max(1, Math.floor(metadata.height * 0.05))} px <span>{Math.ceil(metadata.height * 3)} px</span></small>
+                    </label>
+
+                    <div className="resize-summary">
+                      <span>Output size</span><strong>{resizeWidth} × {resizeHeight}</strong>
+                      <small>{aspectLocked ? 'Aspect ratio locked' : 'Independent dimensions'}</small>
+                    </div>
+                    {resizeError && <p className="text-sm font-semibold text-destructive" role="alert">{resizeError}</p>}
+                  </div>
+                )}
+                <div className="panel-actions">
+                  <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isResizing} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
+                  <Button size="lg" className="h-11 flex-1 font-bold" disabled={isResizing || !metadata} onClick={runResize}>
+                    {isResizing ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
+                  </Button>
+                </div>
+              </>
+            )}
           </aside>
         </section>
       )}
