@@ -1,16 +1,21 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Crop, Download, FileImage, Gauge, ImageDown, LockKeyhole, Maximize2, RotateCcw, UploadCloud } from 'lucide-react';
+import { Crop, Download, FileImage, Gauge, ImageDown, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 type UploadedGif = { file: File; url: string };
 type GifMetadata = { width: number; height: number; frames: number; fps: number | null; duration: number | null };
 const tools = [
   { icon: Maximize2, title: 'Resize', detail: 'Change width and height' },
-  { icon: ImageDown, title: 'Downscale', detail: 'Reduce GIF file size' },
   { icon: Crop, title: 'Crop', detail: 'Trim the visible area' },
-  { icon: Gauge, title: 'Frame rate', detail: 'Adjust playback FPS' },
+  { icon: ImageDown, title: 'Downsizing', detail: 'Reduce dimensions and file size' },
+  { icon: Repeat, title: 'Format Convert', detail: 'Convert to another format' },
+  { icon: RotateCw, title: 'Rotate', detail: 'Turn or flip the image' },
+  { icon: Sparkles, title: 'Optimize', detail: 'Improve GIF efficiency' },
+  { icon: Rewind, title: 'Reverse', detail: 'Play frames in reverse' },
+  { icon: Gauge, title: 'Speed', detail: 'Change playback speed' },
+  { icon: Scissors, title: 'Cut', detail: 'Trim the animation range' },
 ];
 const formatSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
@@ -89,6 +94,7 @@ export default function Home() {
       setError('Please choose a GIF file.');
       return;
     }
+    setMetadata(null);
     setUploaded({ file, url: URL.createObjectURL(file) });
     try {
       setMetadata(parseGifMetadata(await file.arrayBuffer()));
@@ -97,15 +103,15 @@ export default function Home() {
     }
   };
 
-  const reset = () => {
-    setUploaded(null);
-    setMetadata(null);
-    setError('');
-    if (inputRef.current) inputRef.current.value = '';
-  };
-
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
+      <input
+        ref={inputRef}
+        className="sr-only"
+        type="file"
+        accept="image/gif,.gif"
+        onChange={(event) => loadFile(event.target.files?.[0])}
+      />
       <header className="flex h-20 items-center justify-between border-b border-border/80 bg-white/80 px-5 backdrop-blur-xl sm:px-10 lg:px-14">
         <a
           className="brand-mark"
@@ -143,7 +149,6 @@ export default function Home() {
             <div className="upload-icon"><UploadCloud className="size-8" /></div>
             <h2 className="mt-5 text-xl font-bold tracking-tight sm:text-2xl">Drop your GIF here</h2>
             <p className="mt-2 text-sm text-muted-foreground">One GIF at a time · Processed on this device</p>
-            <input ref={inputRef} className="sr-only" type="file" accept="image/gif,.gif" onChange={(event) => loadFile(event.target.files?.[0])} />
             <Button size="lg" className="mt-6 h-12 rounded-full px-7 text-[15px] font-bold shadow-[0_10px_28px_rgba(84,74,246,0.28)]" onClick={() => inputRef.current?.click()}>
               <FileImage className="size-4" /> Choose File
             </Button>
@@ -160,7 +165,10 @@ export default function Home() {
               </div>
               <div className="flex items-center gap-2">
                 <a className="download-button" href={uploaded.url} download={uploaded.file.name}><Download /> Download</a>
-                <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={reset}><RotateCcw /> Replace</Button>
+                <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={() => {
+                  if (inputRef.current) inputRef.current.value = '';
+                  inputRef.current?.click();
+                }}><FileImage /> Choose Another File</Button>
               </div>
             </div>
             <div className="preview-stage"><div className="checkerboard"><img src={uploaded.url} alt={`Preview of ${uploaded.file.name}`} /></div></div>
