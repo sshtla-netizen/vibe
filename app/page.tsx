@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ChevronDown, ChevronRight, Crop, Download, FileImage, Gauge, Image as ImageIcon, ImageDown, LoaderCircle, Lock, LockOpen, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud, Video } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Crop, Download, FileImage, FlipHorizontal2, FlipVertical2, Gauge, Image as ImageIcon, ImageDown, LoaderCircle, Lock, LockOpen, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud, Video } from 'lucide-react';
 import ffmpegCoreUrl from '@ffmpeg/core?url';
 import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
 import { Button } from '@/components/ui/button';
@@ -11,6 +11,7 @@ import { Slider } from '@/components/ui/slider';
 type UploadedGif = { file: File; url: string };
 type GifMetadata = { width: number; height: number; frames: number; fps: number | null; duration: number | null };
 type ResultGif = { blob: Blob; url: string; metadata: GifMetadata };
+type TransformedGif = ResultGif & { rotation: 90 | 180 | 270; flipHorizontal: boolean; flipVertical: boolean };
 type ConvertedFile = { blob: Blob; url: string; format: 'MP4' | 'JPG'; filename: string };
 const cropRatios = [
   { label: '1:1', value: 1 },
@@ -97,7 +98,7 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState('');
   const [metadata, setMetadata] = useState<GifMetadata | null>(null);
-  const [activeTool, setActiveTool] = useState<'tools' | 'resize' | 'crop' | 'downsize' | 'convert'>('tools');
+  const [activeTool, setActiveTool] = useState<'tools' | 'resize' | 'crop' | 'downsize' | 'convert' | 'rotate'>('tools');
   const [resizeWidth, setResizeWidth] = useState(1);
   const [resizeHeight, setResizeHeight] = useState(1);
   const [aspectLocked, setAspectLocked] = useState(true);
@@ -126,12 +127,19 @@ export default function Home() {
   const [isConverting, setIsConverting] = useState(false);
   const [convertProgress, setConvertProgress] = useState(0);
   const [convertError, setConvertError] = useState('');
+  const [rotation, setRotation] = useState<90 | 180 | 270>(90);
+  const [flipHorizontal, setFlipHorizontal] = useState(false);
+  const [flipVertical, setFlipVertical] = useState(false);
+  const [rotated, setRotated] = useState<TransformedGif | null>(null);
+  const [isRotating, setIsRotating] = useState(false);
+  const [rotateError, setRotateError] = useState('');
 
   useEffect(() => () => { if (uploaded) URL.revokeObjectURL(uploaded.url); }, [uploaded]);
   useEffect(() => () => { if (resized) URL.revokeObjectURL(resized.url); }, [resized]);
   useEffect(() => () => { if (cropped) URL.revokeObjectURL(cropped.url); }, [cropped]);
   useEffect(() => () => { if (downsized) URL.revokeObjectURL(downsized.url); }, [downsized]);
   useEffect(() => () => { if (converted) URL.revokeObjectURL(converted.url); }, [converted]);
+  useEffect(() => () => { if (rotated) URL.revokeObjectURL(rotated.url); }, [rotated]);
 
   const loadFile = async (file?: File) => {
     setError('');
@@ -147,10 +155,12 @@ export default function Home() {
     setCropped(null);
     setDownsized(null);
     setConverted(null);
+    setRotated(null);
     setResizeError('');
     setCropError('');
     setDownsizeError('');
     setConvertError('');
+    setRotateError('');
     setUploaded({ file, url: URL.createObjectURL(file) });
     try {
       const nextMetadata = parseGifMetadata(await file.arrayBuffer());
@@ -198,6 +208,14 @@ export default function Home() {
     setConvertProgress(0);
     setConvertError('');
     setActiveTool('convert');
+  };
+
+  const openRotate = () => {
+    setRotation(90);
+    setFlipHorizontal(false);
+    setFlipVertical(false);
+    setRotateError('');
+    setActiveTool('rotate');
   };
 
   const updateWidth = (value: number) => {
@@ -429,6 +447,55 @@ export default function Home() {
     }
   };
 
+  const runRotate = async () => {
+    if (!uploaded || !metadata) return;
+    setIsRotating(true);
+    setRotateError('');
+    try {
+      const { decode, decodeFrames, encode } = await import('modern-gif');
+      const source = await uploaded.file.arrayBuffer();
+      const gif = decode(source);
+      const frames = decodeFrames(source, { gif });
+      const swapsAxes = rotation === 90 || rotation === 270;
+      const outputWidth = swapsAxes ? gif.height : gif.width;
+      const outputHeight = swapsAxes ? gif.width : gif.height;
+      const sourceCanvas = document.createElement('canvas');
+      const targetCanvas = document.createElement('canvas');
+      sourceCanvas.width = gif.width;
+      sourceCanvas.height = gif.height;
+      targetCanvas.width = outputWidth;
+      targetCanvas.height = outputHeight;
+      const sourceContext = sourceCanvas.getContext('2d');
+      const targetContext = targetCanvas.getContext('2d');
+      if (!sourceContext || !targetContext) throw new Error('Canvas is unavailable');
+
+      const outputFrames = frames.map((frame) => {
+        sourceContext.clearRect(0, 0, gif.width, gif.height);
+        sourceContext.putImageData(new ImageData(frame.data, frame.width, frame.height), 0, 0);
+        targetContext.clearRect(0, 0, outputWidth, outputHeight);
+        targetContext.save();
+        targetContext.translate(outputWidth / 2, outputHeight / 2);
+        targetContext.rotate(rotation * Math.PI / 180);
+        targetContext.scale(flipHorizontal ? -1 : 1, flipVertical ? -1 : 1);
+        targetContext.drawImage(sourceCanvas, -gif.width / 2, -gif.height / 2);
+        targetContext.restore();
+        return { data: targetContext.getImageData(0, 0, outputWidth, outputHeight).data, delay: frame.delay };
+      });
+
+      const blob = await encode({
+        format: 'blob', width: outputWidth, height: outputHeight, frames: outputFrames,
+        looped: gif.looped, loopCount: gif.loopCount, maxColors: 255, dither: 'floyd-steinberg',
+      });
+      const resultMetadata = parseGifMetadata(await blob.arrayBuffer());
+      setRotated({ blob, url: URL.createObjectURL(blob), metadata: resultMetadata, rotation, flipHorizontal, flipVertical });
+      setShowOriginal(false);
+    } catch {
+      setRotateError('The GIF could not be transformed. Please try again.');
+    } finally {
+      setIsRotating(false);
+    }
+  };
+
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
       <input
@@ -624,6 +691,31 @@ export default function Home() {
                 </div>
               </section>
             )}
+
+            {rotated && (
+              <section className="preview-card min-w-0" aria-label="Transformed GIF">
+                <div className="preview-header">
+                  <span className="result-badge"><RotateCw /></span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9e97ff]">Transformed GIF</p>
+                    <p className="truncate text-sm font-semibold text-white">Rotated_{uploaded.file.name}</p>
+                  </div>
+                  <a className="download-button" href={rotated.url} download={`Rotated_${uploaded.file.name}`}><Download /> Download</a>
+                </div>
+                <div className="preview-stage"><div className="checkerboard"><img src={rotated.url} alt={`Transformed preview of ${uploaded.file.name}`} /></div></div>
+                <div className="gif-info">
+                  <h2 className="text-xl font-black tracking-[-0.03em] text-white">File information</h2>
+                  <dl className="metadata-grid">
+                    <div><dt>File size</dt><dd>{formatSize(rotated.blob.size)}</dd></div>
+                    <div><dt>Resolution</dt><dd>{rotated.metadata.width} × {rotated.metadata.height}</dd></div>
+                    <div><dt>Rotation</dt><dd>{rotated.rotation}°</dd></div>
+                    <div><dt>Horizontal flip</dt><dd>{rotated.flipHorizontal ? 'Yes' : 'No'}</dd></div>
+                    <div><dt>Vertical flip</dt><dd>{rotated.flipVertical ? 'Yes' : 'No'}</dd></div>
+                    <div><dt>Format</dt><dd>GIF</dd></div>
+                  </dl>
+                </div>
+              </section>
+            )}
           </div>
           <aside className="panel-card" aria-label="GIF editing panel">
             {activeTool === 'tools' ? (
@@ -635,7 +727,7 @@ export default function Home() {
                 </div>
                 <div className="grid gap-3 p-4 sm:p-5">
                   {tools.map(({ icon: Icon, title, detail }) => (
-                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : title === 'Crop' ? openCrop : title === 'Downsizing' ? openDownsize : title === 'Format Convert' ? openConvert : undefined}>
+                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : title === 'Crop' ? openCrop : title === 'Downsizing' ? openDownsize : title === 'Format Convert' ? openConvert : title === 'Rotate' ? openRotate : undefined}>
                       <span className="tool-icon"><Icon /></span>
                       <span className="min-w-0 flex-1 text-left"><span className="block text-sm font-bold">{title}</span><span className="block text-xs text-muted-foreground">{detail}</span></span>
                       <span className="text-lg text-muted-foreground/50">›</span>
@@ -781,7 +873,7 @@ export default function Home() {
                   </Button>
                 </div>
               </>
-            ) : (
+            ) : activeTool === 'convert' ? (
               <>
                 <div className="border-b border-border px-5 py-5 sm:px-6">
                   <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Format convert</p>
@@ -821,6 +913,48 @@ export default function Home() {
                   <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isConverting} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
                   <Button size="lg" className="h-11 flex-1 font-bold" disabled={isConverting || !metadata} onClick={runConvert}>
                     {isConverting ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="border-b border-border px-5 py-5 sm:px-6">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Rotate tool</p>
+                  <h2 className="mt-1 text-2xl font-black tracking-[-0.035em]">Transform your GIF</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">Rotate, flip, or combine both transformations.</p>
+                </div>
+                <div className="rotate-controls">
+                  <fieldset>
+                    <legend>Rotation</legend>
+                    <div className="rotation-grid">
+                      {([90, 180, 270] as const).map((degrees) => (
+                        <button key={degrees} type="button" className={rotation === degrees ? 'is-selected' : ''} onClick={() => setRotation(degrees)}>
+                          <RotateCw /><span>{degrees}°</span>
+                        </button>
+                      ))}
+                    </div>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Flip</legend>
+                    <div className="flip-grid">
+                      <button type="button" className={flipHorizontal ? 'is-selected' : ''} aria-pressed={flipHorizontal} onClick={() => setFlipHorizontal((value) => !value)}>
+                        <FlipHorizontal2 /><span><b>Horizontal</b><small>Mirror left to right</small></span>
+                      </button>
+                      <button type="button" className={flipVertical ? 'is-selected' : ''} aria-pressed={flipVertical} onClick={() => setFlipVertical((value) => !value)}>
+                        <FlipVertical2 /><span><b>Vertical</b><small>Mirror top to bottom</small></span>
+                      </button>
+                    </div>
+                  </fieldset>
+                  <div className="transform-summary">
+                    <span className="transform-preview" style={{ transform: `rotate(${rotation}deg) scaleX(${flipHorizontal ? -1 : 1}) scaleY(${flipVertical ? -1 : 1})` }}><ImageIcon /></span>
+                    <p><b>Output transformation</b><span>{rotation}° rotation{flipHorizontal ? ' · horizontal flip' : ''}{flipVertical ? ' · vertical flip' : ''}</span></p>
+                  </div>
+                  {rotateError && <p className="text-sm font-semibold text-destructive" role="alert">{rotateError}</p>}
+                </div>
+                <div className="panel-actions">
+                  <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isRotating} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
+                  <Button size="lg" className="h-11 flex-1 font-bold" disabled={isRotating || !metadata} onClick={runRotate}>
+                    {isRotating ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
                   </Button>
                 </div>
               </>
