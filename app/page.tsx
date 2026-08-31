@@ -1,10 +1,11 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Crop, FileImage, Gauge, ImageDown, LockKeyhole, Maximize2, RotateCcw, UploadCloud } from 'lucide-react';
+import { Crop, Download, FileImage, Gauge, ImageDown, LockKeyhole, Maximize2, RotateCcw, UploadCloud } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 type UploadedGif = { file: File; url: string };
+type GifMetadata = { width: number; height: number; frames: number; fps: number | null; duration: number | null };
 const tools = [
   { icon: Maximize2, title: 'Resize', detail: 'Change width and height' },
   { icon: ImageDown, title: 'Downscale', detail: 'Reduce GIF file size' },
@@ -13,15 +14,75 @@ const tools = [
 ];
 const formatSize = (bytes: number) => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
+function parseGifMetadata(buffer: ArrayBuffer): GifMetadata {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const signature = String.fromCharCode(...bytes.slice(0, 6));
+  if (!signature.startsWith('GIF') || bytes.length < 13) throw new Error('Invalid GIF');
+
+  const width = view.getUint16(6, true);
+  const height = view.getUint16(8, true);
+  let position = 13;
+  let frames = 0;
+  const delays: number[] = [];
+  const globalColorTable = bytes[10] & 0x80;
+  if (globalColorTable) position += 3 * 2 ** ((bytes[10] & 0x07) + 1);
+
+  const skipSubBlocks = () => {
+    while (position < bytes.length) {
+      const size = bytes[position++];
+      if (size === 0) break;
+      position += size;
+    }
+  };
+
+  while (position < bytes.length) {
+    const marker = bytes[position++];
+    if (marker === 0x3b) break;
+    if (marker === 0x21) {
+      const label = bytes[position++];
+      if (label === 0xf9) {
+        const size = bytes[position++];
+        if (size >= 4 && position + size <= bytes.length) delays.push(view.getUint16(position + 1, true) * 10);
+        position += size + 1;
+      } else {
+        skipSubBlocks();
+      }
+      continue;
+    }
+    if (marker === 0x2c) {
+      frames += 1;
+      if (position + 9 > bytes.length) break;
+      const packed = bytes[position + 8];
+      position += 9;
+      if (packed & 0x80) position += 3 * 2 ** ((packed & 0x07) + 1);
+      position += 1;
+      skipSubBlocks();
+      continue;
+    }
+    break;
+  }
+
+  const durationMs = delays.reduce((sum, delay) => sum + delay, 0);
+  return {
+    width,
+    height,
+    frames,
+    duration: durationMs ? durationMs / 1000 : null,
+    fps: durationMs && frames ? frames / (durationMs / 1000) : null,
+  };
+}
+
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploaded, setUploaded] = useState<UploadedGif | null>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState('');
+  const [metadata, setMetadata] = useState<GifMetadata | null>(null);
 
   useEffect(() => () => { if (uploaded) URL.revokeObjectURL(uploaded.url); }, [uploaded]);
 
-  const loadFile = (file?: File) => {
+  const loadFile = async (file?: File) => {
     setError('');
     if (!file) return;
     if (!(file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif'))) {
@@ -29,10 +90,16 @@ export default function Home() {
       return;
     }
     setUploaded({ file, url: URL.createObjectURL(file) });
+    try {
+      setMetadata(parseGifMetadata(await file.arrayBuffer()));
+    } catch {
+      setMetadata(null);
+    }
   };
 
   const reset = () => {
     setUploaded(null);
+    setMetadata(null);
     setError('');
     if (inputRef.current) inputRef.current.value = '';
   };
@@ -91,9 +158,26 @@ export default function Home() {
                 <p className="truncate text-sm font-semibold text-white">{uploaded.file.name}</p>
                 <p className="mt-0.5 text-xs text-white/50">GIF · {formatSize(uploaded.file.size)}</p>
               </div>
-              <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={reset}><RotateCcw /> Replace</Button>
+              <div className="flex items-center gap-2">
+                <a className="download-button" href={uploaded.url} download={uploaded.file.name}><Download /> Download</a>
+                <Button variant="ghost" size="sm" className="text-white/70 hover:bg-white/10 hover:text-white" onClick={reset}><RotateCcw /> Replace</Button>
+              </div>
             </div>
             <div className="preview-stage"><div className="checkerboard"><img src={uploaded.url} alt={`Preview of ${uploaded.file.name}`} /></div></div>
+            <div className="gif-info">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#9e97ff]">Original GIF</p>
+                <h2 className="mt-1 text-xl font-black tracking-[-0.03em] text-white">File information</h2>
+              </div>
+              <dl className="metadata-grid">
+                <div><dt>File size</dt><dd>{formatSize(uploaded.file.size)}</dd></div>
+                <div><dt>Resolution</dt><dd>{metadata ? `${metadata.width} × ${metadata.height}` : '—'}</dd></div>
+                <div><dt>Frame rate</dt><dd>{metadata?.fps ? `${metadata.fps.toFixed(1)} FPS` : '—'}</dd></div>
+                <div><dt>Total frames</dt><dd>{metadata ? metadata.frames.toLocaleString() : '—'}</dd></div>
+                <div><dt>Duration</dt><dd>{metadata?.duration ? `${metadata.duration.toFixed(2)} sec` : '—'}</dd></div>
+                <div><dt>Format</dt><dd>GIF</dd></div>
+              </dl>
+            </div>
           </section>
           <aside className="panel-card" aria-label="GIF editing panel">
             <div className="border-b border-border px-5 py-5 sm:px-6">
