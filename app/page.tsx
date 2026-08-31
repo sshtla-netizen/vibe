@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ChevronDown, ChevronRight, Crop, Download, FileImage, Gauge, ImageDown, LoaderCircle, Lock, LockOpen, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Crop, Download, FileImage, Gauge, Image as ImageIcon, ImageDown, LoaderCircle, Lock, LockOpen, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud, Video } from 'lucide-react';
+import ffmpegCoreUrl from '@ffmpeg/core?url';
+import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Slider } from '@/components/ui/slider';
@@ -9,6 +11,7 @@ import { Slider } from '@/components/ui/slider';
 type UploadedGif = { file: File; url: string };
 type GifMetadata = { width: number; height: number; frames: number; fps: number | null; duration: number | null };
 type ResultGif = { blob: Blob; url: string; metadata: GifMetadata };
+type ConvertedFile = { blob: Blob; url: string; format: 'MP4' | 'JPG'; filename: string };
 const cropRatios = [
   { label: '1:1', value: 1 },
   { label: '4:3', value: 4 / 3 },
@@ -94,7 +97,7 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState('');
   const [metadata, setMetadata] = useState<GifMetadata | null>(null);
-  const [activeTool, setActiveTool] = useState<'tools' | 'resize' | 'crop' | 'downsize'>('tools');
+  const [activeTool, setActiveTool] = useState<'tools' | 'resize' | 'crop' | 'downsize' | 'convert'>('tools');
   const [resizeWidth, setResizeWidth] = useState(1);
   const [resizeHeight, setResizeHeight] = useState(1);
   const [aspectLocked, setAspectLocked] = useState(true);
@@ -117,11 +120,18 @@ export default function Home() {
   const [downsized, setDownsized] = useState<ResultGif | null>(null);
   const [isDownsizing, setIsDownsizing] = useState(false);
   const [downsizeError, setDownsizeError] = useState('');
+  const [convertFormat, setConvertFormat] = useState<'mp4' | 'jpg'>('mp4');
+  const [jpgQuality, setJpgQuality] = useState(90);
+  const [converted, setConverted] = useState<ConvertedFile | null>(null);
+  const [isConverting, setIsConverting] = useState(false);
+  const [convertProgress, setConvertProgress] = useState(0);
+  const [convertError, setConvertError] = useState('');
 
   useEffect(() => () => { if (uploaded) URL.revokeObjectURL(uploaded.url); }, [uploaded]);
   useEffect(() => () => { if (resized) URL.revokeObjectURL(resized.url); }, [resized]);
   useEffect(() => () => { if (cropped) URL.revokeObjectURL(cropped.url); }, [cropped]);
   useEffect(() => () => { if (downsized) URL.revokeObjectURL(downsized.url); }, [downsized]);
+  useEffect(() => () => { if (converted) URL.revokeObjectURL(converted.url); }, [converted]);
 
   const loadFile = async (file?: File) => {
     setError('');
@@ -136,9 +146,11 @@ export default function Home() {
     setResized(null);
     setCropped(null);
     setDownsized(null);
+    setConverted(null);
     setResizeError('');
     setCropError('');
     setDownsizeError('');
+    setConvertError('');
     setUploaded({ file, url: URL.createObjectURL(file) });
     try {
       const nextMetadata = parseGifMetadata(await file.arrayBuffer());
@@ -178,6 +190,14 @@ export default function Home() {
     setColorCount(128);
     setDownsizeError('');
     setActiveTool('downsize');
+  };
+
+  const openConvert = () => {
+    setConvertFormat('mp4');
+    setJpgQuality(90);
+    setConvertProgress(0);
+    setConvertError('');
+    setActiveTool('convert');
   };
 
   const updateWidth = (value: number) => {
@@ -358,6 +378,57 @@ export default function Home() {
     }
   };
 
+  const runConvert = async () => {
+    if (!uploaded || !metadata) return;
+    setIsConverting(true);
+    setConvertProgress(0);
+    setConvertError('');
+    try {
+      const baseName = uploaded.file.name.replace(/\.gif$/i, '');
+      if (convertFormat === 'jpg') {
+        const { decode, decodeFrames } = await import('modern-gif');
+        const source = await uploaded.file.arrayBuffer();
+        const gif = decode(source);
+        const firstFrame = decodeFrames(source, { gif, range: [0, 1] })[0];
+        const frameCanvas = document.createElement('canvas');
+        const outputCanvas = document.createElement('canvas');
+        frameCanvas.width = gif.width;
+        frameCanvas.height = gif.height;
+        outputCanvas.width = gif.width;
+        outputCanvas.height = gif.height;
+        const frameContext = frameCanvas.getContext('2d');
+        const outputContext = outputCanvas.getContext('2d');
+        if (!firstFrame || !frameContext || !outputContext) throw new Error('Canvas is unavailable');
+        frameContext.putImageData(new ImageData(firstFrame.data, firstFrame.width, firstFrame.height), 0, 0);
+        outputContext.fillStyle = '#ffffff';
+        outputContext.fillRect(0, 0, gif.width, gif.height);
+        outputContext.drawImage(frameCanvas, 0, 0);
+        const blob = await new Promise<Blob>((resolve, reject) => outputCanvas.toBlob((result) => result ? resolve(result) : reject(new Error('JPG conversion failed')), 'image/jpeg', jpgQuality / 100));
+        setConverted({ blob, url: URL.createObjectURL(blob), format: 'JPG', filename: `Converted_${baseName}.jpg` });
+        setConvertProgress(100);
+      } else {
+        const { FFmpeg } = await import('@ffmpeg/ffmpeg');
+        const ffmpeg = new FFmpeg();
+        ffmpeg.on('progress', ({ progress }) => setConvertProgress(Math.min(99, Math.max(0, Math.round(progress * 100)))));
+        await ffmpeg.load({ coreURL: ffmpegCoreUrl, wasmURL: ffmpegWasmUrl });
+        await ffmpeg.writeFile('input.gif', new Uint8Array(await uploaded.file.arrayBuffer()));
+        const exitCode = await ffmpeg.exec(['-i', 'input.gif', '-vf', 'scale=ceil(iw/2)*2:ceil(ih/2)*2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', 'output.mp4']);
+        if (exitCode !== 0) throw new Error('MP4 conversion failed');
+        const data = await ffmpeg.readFile('output.mp4');
+        const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+        const blob = new Blob([bytes], { type: 'video/mp4' });
+        ffmpeg.terminate();
+        setConverted({ blob, url: URL.createObjectURL(blob), format: 'MP4', filename: `Converted_${baseName}.mp4` });
+        setConvertProgress(100);
+      }
+      setShowOriginal(false);
+    } catch {
+      setConvertError('The file could not be converted. Please try again with another GIF.');
+    } finally {
+      setIsConverting(false);
+    }
+  };
+
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
       <input
@@ -522,6 +593,37 @@ export default function Home() {
                 </div>
               </section>
             )}
+
+            {converted && (
+              <section className="preview-card min-w-0" aria-label={`Converted ${converted.format}`}>
+                <div className="preview-header">
+                  <span className="result-badge">{converted.format === 'MP4' ? <Video /> : <ImageIcon />}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9e97ff]">Converted {converted.format}</p>
+                    <p className="truncate text-sm font-semibold text-white">{converted.filename}</p>
+                  </div>
+                  <a className="download-button" href={converted.url} download={converted.filename}><Download /> Download</a>
+                </div>
+                <div className="preview-stage">
+                  <div className="checkerboard">
+                    {converted.format === 'MP4'
+                      ? <video className="converted-video" src={converted.url} controls loop playsInline aria-label={`MP4 preview of ${uploaded.file.name}`} />
+                      : <img src={converted.url} alt={`JPG preview of ${uploaded.file.name}`} />}
+                  </div>
+                </div>
+                <div className="gif-info">
+                  <h2 className="text-xl font-black tracking-[-0.03em] text-white">File information</h2>
+                  <dl className="metadata-grid">
+                    <div><dt>File size</dt><dd>{formatSize(converted.blob.size)}</dd></div>
+                    <div><dt>Resolution</dt><dd>{metadata ? `${metadata.width} × ${metadata.height}` : '—'}</dd></div>
+                    <div><dt>Format</dt><dd>{converted.format}</dd></div>
+                    <div><dt>Content</dt><dd>{converted.format === 'MP4' ? 'Animation' : 'First frame'}</dd></div>
+                    <div><dt>Duration</dt><dd>{converted.format === 'MP4' && metadata?.duration ? `${metadata.duration.toFixed(2)} sec` : '—'}</dd></div>
+                    <div><dt>Source</dt><dd>GIF</dd></div>
+                  </dl>
+                </div>
+              </section>
+            )}
           </div>
           <aside className="panel-card" aria-label="GIF editing panel">
             {activeTool === 'tools' ? (
@@ -533,7 +635,7 @@ export default function Home() {
                 </div>
                 <div className="grid gap-3 p-4 sm:p-5">
                   {tools.map(({ icon: Icon, title, detail }) => (
-                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : title === 'Crop' ? openCrop : title === 'Downsizing' ? openDownsize : undefined}>
+                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : title === 'Crop' ? openCrop : title === 'Downsizing' ? openDownsize : title === 'Format Convert' ? openConvert : undefined}>
                       <span className="tool-icon"><Icon /></span>
                       <span className="min-w-0 flex-1 text-left"><span className="block text-sm font-bold">{title}</span><span className="block text-xs text-muted-foreground">{detail}</span></span>
                       <span className="text-lg text-muted-foreground/50">›</span>
@@ -630,7 +732,7 @@ export default function Home() {
                   </Button>
                 </div>
               </>
-            ) : (
+            ) : activeTool === 'downsize' ? (
               <>
                 <div className="border-b border-border px-5 py-5 sm:px-6">
                   <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Downsizing tool</p>
@@ -676,6 +778,49 @@ export default function Home() {
                   <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isDownsizing} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
                   <Button size="lg" className="h-11 flex-1 font-bold" disabled={isDownsizing || !metadata || (!reduceSize && !removeFrames && !reduceColors)} onClick={runDownsize}>
                     {isDownsizing ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="border-b border-border px-5 py-5 sm:px-6">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Format convert</p>
+                  <h2 className="mt-1 text-2xl font-black tracking-[-0.035em]">Convert your GIF</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">Choose MP4 animation or a JPG still image.</p>
+                </div>
+                <div className="convert-controls">
+                  <div className="format-grid">
+                    <button type="button" className={convertFormat === 'mp4' ? 'is-selected' : ''} onClick={() => setConvertFormat('mp4')}>
+                      <Video /><span><b>MP4</b><small>Keep the animation</small></span>
+                    </button>
+                    <button type="button" className={convertFormat === 'jpg' ? 'is-selected' : ''} onClick={() => setConvertFormat('jpg')}>
+                      <ImageIcon /><span><b>JPG</b><small>Export the first frame</small></span>
+                    </button>
+                  </div>
+                  {convertFormat === 'jpg' ? (
+                    <div className="method-settings convert-quality">
+                      <div><span>JPG quality</span><output>{jpgQuality}%</output></div>
+                      <Slider min={40} max={100} step={5} value={[jpgQuality]} onValueChange={(value) => setJpgQuality(Array.isArray(value) ? value[0] : value)} />
+                      <small>Transparent areas are filled with white.</small>
+                    </div>
+                  ) : (
+                    <div className="convert-note">
+                      <Video /><p><b>Browser-based MP4 conversion</b><span>The converter loads locally and your GIF is never uploaded.</span></p>
+                    </div>
+                  )}
+                  {isConverting && (
+                    <div className="convert-progress" aria-live="polite">
+                      <span><b>Converting</b><output>{convertProgress}%</output></span>
+                      <div><i style={{ width: `${convertProgress}%` }} /></div>
+                      <small>{convertFormat === 'mp4' ? 'The first MP4 conversion may take a moment.' : 'Creating JPG image…'}</small>
+                    </div>
+                  )}
+                  {convertError && <p className="text-sm font-semibold text-destructive" role="alert">{convertError}</p>}
+                </div>
+                <div className="panel-actions">
+                  <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isConverting} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
+                  <Button size="lg" className="h-11 flex-1 font-bold" disabled={isConverting || !metadata} onClick={runConvert}>
+                    {isConverting ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
                   </Button>
                 </div>
               </>
