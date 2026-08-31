@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ChevronDown, ChevronRight, Crop, Download, FileImage, Gauge, ImageDown, LoaderCircle, Lock, LockOpen, LockKeyhole, Maximize2, Repeat, Rewind, RotateCw, Scissors, Sparkles, UploadCloud } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Slider } from '@/components/ui/slider';
 
 type UploadedGif = { file: File; url: string };
@@ -93,7 +94,7 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState('');
   const [metadata, setMetadata] = useState<GifMetadata | null>(null);
-  const [activeTool, setActiveTool] = useState<'tools' | 'resize' | 'crop'>('tools');
+  const [activeTool, setActiveTool] = useState<'tools' | 'resize' | 'crop' | 'downsize'>('tools');
   const [resizeWidth, setResizeWidth] = useState(1);
   const [resizeHeight, setResizeHeight] = useState(1);
   const [aspectLocked, setAspectLocked] = useState(true);
@@ -107,10 +108,20 @@ export default function Home() {
   const [cropped, setCropped] = useState<ResultGif | null>(null);
   const [isCropping, setIsCropping] = useState(false);
   const [cropError, setCropError] = useState('');
+  const [reduceSize, setReduceSize] = useState(true);
+  const [sizePercent, setSizePercent] = useState(70);
+  const [removeFrames, setRemoveFrames] = useState(false);
+  const [frameStep, setFrameStep] = useState(2);
+  const [reduceColors, setReduceColors] = useState(false);
+  const [colorCount, setColorCount] = useState(128);
+  const [downsized, setDownsized] = useState<ResultGif | null>(null);
+  const [isDownsizing, setIsDownsizing] = useState(false);
+  const [downsizeError, setDownsizeError] = useState('');
 
   useEffect(() => () => { if (uploaded) URL.revokeObjectURL(uploaded.url); }, [uploaded]);
   useEffect(() => () => { if (resized) URL.revokeObjectURL(resized.url); }, [resized]);
   useEffect(() => () => { if (cropped) URL.revokeObjectURL(cropped.url); }, [cropped]);
+  useEffect(() => () => { if (downsized) URL.revokeObjectURL(downsized.url); }, [downsized]);
 
   const loadFile = async (file?: File) => {
     setError('');
@@ -124,8 +135,10 @@ export default function Home() {
     setShowOriginal(true);
     setResized(null);
     setCropped(null);
+    setDownsized(null);
     setResizeError('');
     setCropError('');
+    setDownsizeError('');
     setUploaded({ file, url: URL.createObjectURL(file) });
     try {
       const nextMetadata = parseGifMetadata(await file.arrayBuffer());
@@ -153,6 +166,18 @@ export default function Home() {
     setCropColor('#ffffff');
     setCropError('');
     setActiveTool('crop');
+  };
+
+  const openDownsize = () => {
+    if (!metadata) return;
+    setReduceSize(true);
+    setSizePercent(70);
+    setRemoveFrames(false);
+    setFrameStep(2);
+    setReduceColors(false);
+    setColorCount(128);
+    setDownsizeError('');
+    setActiveTool('downsize');
   };
 
   const updateWidth = (value: number) => {
@@ -276,6 +301,60 @@ export default function Home() {
       setCropError('The GIF could not be cropped. Please try another option.');
     } finally {
       setIsCropping(false);
+    }
+  };
+
+  const runDownsize = async () => {
+    if (!uploaded || !metadata || (!reduceSize && !removeFrames && !reduceColors)) return;
+    setIsDownsizing(true);
+    setDownsizeError('');
+    try {
+      const { decode, decodeFrames, encode } = await import('modern-gif');
+      const source = await uploaded.file.arrayBuffer();
+      const gif = decode(source);
+      const frames = decodeFrames(source, { gif });
+      const scale = reduceSize ? sizePercent / 100 : 1;
+      const outputWidth = Math.max(1, Math.round(gif.width * scale));
+      const outputHeight = Math.max(1, Math.round(gif.height * scale));
+      const sourceCanvas = document.createElement('canvas');
+      const targetCanvas = document.createElement('canvas');
+      sourceCanvas.width = gif.width;
+      sourceCanvas.height = gif.height;
+      targetCanvas.width = outputWidth;
+      targetCanvas.height = outputHeight;
+      const sourceContext = sourceCanvas.getContext('2d');
+      const targetContext = targetCanvas.getContext('2d');
+      if (!sourceContext || !targetContext) throw new Error('Canvas is unavailable');
+
+      const encodedFrames: Array<{ data: Uint8ClampedArray; delay: number }> = [];
+      frames.forEach((frame, index) => {
+        const shouldKeep = !removeFrames || index % frameStep === 0;
+        if (!shouldKeep) {
+          if (encodedFrames.length) encodedFrames[encodedFrames.length - 1].delay += frame.delay;
+          return;
+        }
+        sourceContext.clearRect(0, 0, gif.width, gif.height);
+        sourceContext.putImageData(new ImageData(frame.data, frame.width, frame.height), 0, 0);
+        targetContext.clearRect(0, 0, outputWidth, outputHeight);
+        targetContext.imageSmoothingEnabled = true;
+        targetContext.imageSmoothingQuality = 'high';
+        targetContext.drawImage(sourceCanvas, 0, 0, outputWidth, outputHeight);
+        encodedFrames.push({ data: targetContext.getImageData(0, 0, outputWidth, outputHeight).data, delay: frame.delay });
+      });
+
+      const blob = await encode({
+        format: 'blob', width: outputWidth, height: outputHeight, frames: encodedFrames,
+        looped: gif.looped, loopCount: gif.loopCount,
+        maxColors: reduceColors ? colorCount : 255,
+        dither: 'floyd-steinberg',
+      });
+      const resultMetadata = parseGifMetadata(await blob.arrayBuffer());
+      setDownsized({ blob, url: URL.createObjectURL(blob), metadata: resultMetadata });
+      setShowOriginal(false);
+    } catch {
+      setDownsizeError('The GIF could not be downsized. Please try different settings.');
+    } finally {
+      setIsDownsizing(false);
     }
   };
 
@@ -418,6 +497,31 @@ export default function Home() {
                 </div>
               </section>
             )}
+
+            {downsized && (
+              <section className="preview-card min-w-0" aria-label="Downsized GIF">
+                <div className="preview-header">
+                  <span className="result-badge"><ImageDown /></span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#9e97ff]">Downsized GIF</p>
+                    <p className="truncate text-sm font-semibold text-white">Downsized_{uploaded.file.name}</p>
+                  </div>
+                  <a className="download-button" href={downsized.url} download={`Downsized_${uploaded.file.name}`}><Download /> Download</a>
+                </div>
+                <div className="preview-stage"><div className="checkerboard"><img src={downsized.url} alt={`Downsized preview of ${uploaded.file.name}`} /></div></div>
+                <div className="gif-info">
+                  <h2 className="text-xl font-black tracking-[-0.03em] text-white">File information</h2>
+                  <dl className="metadata-grid">
+                    <div><dt>File size</dt><dd>{formatSize(downsized.blob.size)}</dd></div>
+                    <div><dt>Resolution</dt><dd>{downsized.metadata.width} × {downsized.metadata.height}</dd></div>
+                    <div><dt>Reduction</dt><dd>{Math.max(0, Math.round((1 - downsized.blob.size / uploaded.file.size) * 100))}%</dd></div>
+                    <div><dt>Total frames</dt><dd>{downsized.metadata.frames.toLocaleString()}</dd></div>
+                    <div><dt>Duration</dt><dd>{downsized.metadata.duration ? `${downsized.metadata.duration.toFixed(2)} sec` : '—'}</dd></div>
+                    <div><dt>Format</dt><dd>GIF</dd></div>
+                  </dl>
+                </div>
+              </section>
+            )}
           </div>
           <aside className="panel-card" aria-label="GIF editing panel">
             {activeTool === 'tools' ? (
@@ -429,7 +533,7 @@ export default function Home() {
                 </div>
                 <div className="grid gap-3 p-4 sm:p-5">
                   {tools.map(({ icon: Icon, title, detail }) => (
-                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : title === 'Crop' ? openCrop : undefined}>
+                    <button key={title} className="tool-row" type="button" onClick={title === 'Resize' ? openResize : title === 'Crop' ? openCrop : title === 'Downsizing' ? openDownsize : undefined}>
                       <span className="tool-icon"><Icon /></span>
                       <span className="min-w-0 flex-1 text-left"><span className="block text-sm font-bold">{title}</span><span className="block text-xs text-muted-foreground">{detail}</span></span>
                       <span className="text-lg text-muted-foreground/50">›</span>
@@ -481,7 +585,7 @@ export default function Home() {
                   </Button>
                 </div>
               </>
-            ) : (
+            ) : activeTool === 'crop' ? (
               <>
                 <div className="border-b border-border px-5 py-5 sm:px-6">
                   <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Crop tool</p>
@@ -523,6 +627,55 @@ export default function Home() {
                   <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isCropping} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
                   <Button size="lg" className="h-11 flex-1 font-bold" disabled={isCropping || !metadata} onClick={runCrop}>
                     {isCropping ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="border-b border-border px-5 py-5 sm:px-6">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Downsizing tool</p>
+                  <h2 className="mt-1 text-2xl font-black tracking-[-0.035em]">Make your GIF lighter</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">Check one or more reduction methods.</p>
+                </div>
+                <div className="downsize-controls">
+                  <div className={`method-card ${reduceSize ? 'is-selected' : ''}`}>
+                    <label><Checkbox checked={reduceSize} onCheckedChange={(checked) => setReduceSize(Boolean(checked))} /><span><b>Size reduction</b><small>Scale width and height together</small></span></label>
+                    {reduceSize && (
+                      <div className="method-settings">
+                        <div><span>Scale</span><output>{sizePercent}%</output></div>
+                        <Slider min={10} max={90} step={5} value={[sizePercent]} onValueChange={(value) => setSizePercent(Array.isArray(value) ? value[0] : value)} />
+                        <small>{metadata ? `${Math.round(metadata.width * sizePercent / 100)} × ${Math.round(metadata.height * sizePercent / 100)} px` : ''}</small>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className={`method-card ${removeFrames ? 'is-selected' : ''}`}>
+                    <label><Checkbox checked={removeFrames} onCheckedChange={(checked) => setRemoveFrames(Boolean(checked))} /><span><b>Frame deletion</b><small>Keep every Nth frame</small></span></label>
+                    {removeFrames && (
+                      <div className="method-settings">
+                        <div><span>Keep interval</span><output>1 / {frameStep}</output></div>
+                        <Slider min={2} max={5} step={1} value={[frameStep]} onValueChange={(value) => setFrameStep(Array.isArray(value) ? value[0] : value)} />
+                        <small>Playback duration is preserved</small>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className={`method-card ${reduceColors ? 'is-selected' : ''}`}>
+                    <label><Checkbox checked={reduceColors} onCheckedChange={(checked) => setReduceColors(Boolean(checked))} /><span><b>Lower resolution</b><small>Reduce the GIF color palette</small></span></label>
+                    {reduceColors && (
+                      <div className="palette-options">
+                        {[32, 64, 128].map((colors) => <button key={colors} type="button" className={colorCount === colors ? 'is-selected' : ''} onClick={() => setColorCount(colors)}>{colors} colors</button>)}
+                      </div>
+                    )}
+                  </div>
+
+                  {!reduceSize && !removeFrames && !reduceColors && <p className="method-warning">Select at least one method.</p>}
+                  {downsizeError && <p className="text-sm font-semibold text-destructive" role="alert">{downsizeError}</p>}
+                </div>
+                <div className="panel-actions">
+                  <Button variant="outline" size="lg" className="h-11 flex-1" disabled={isDownsizing} onClick={() => setActiveTool('tools')}><ArrowLeft /> Back</Button>
+                  <Button size="lg" className="h-11 flex-1 font-bold" disabled={isDownsizing || !metadata || (!reduceSize && !removeFrames && !reduceColors)} onClick={runDownsize}>
+                    {isDownsizing ? <><LoaderCircle className="animate-spin" /> Processing</> : <>Go!</>}
                   </Button>
                 </div>
               </>
